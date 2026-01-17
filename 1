@@ -1,0 +1,172 @@
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+
+--// SERVIÇOS
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local LP = Players.LocalPlayer
+
+--// CONFIGURAÇÕES
+local Config = {
+    AutoFarm = false,
+    SelectedMob = "",
+    Distance = 6, -- Distância segura
+    CurrentTarget = nil -- Guarda o alvo atual para não buscar toda hora
+}
+
+--// OTIMIZAÇÃO: Tenta achar onde os monstros ficam para não travar
+local function GetEnemyFolder()
+    -- Lista de nomes comuns de pastas de inimigos
+    local possibleFolders = {"Enemies", "Mobs", "Monsters", "NPCs", "Units"}
+    for _, name in pairs(possibleFolders) do
+        if Workspace:FindFirstChild(name) then
+            return Workspace[name]
+        end
+    end
+    return Workspace -- Se não achar, usa o Workspace todo (mais lento, mas funciona)
+end
+
+--// FUNÇÃO: BUSCA OTIMIZADA
+local function GetClosestEnemy(name)
+    local closest = nil
+    local maxDist = 2000 -- Limite de distância para não travar buscando longe demais
+    
+    local searchLocation = GetEnemyFolder()
+    local targets = (searchLocation == Workspace) and Workspace:GetDescendants() or searchLocation:GetChildren()
+
+    for _, v in pairs(targets) do
+        if v:IsA("Model") and v:FindFirstChild("HumanoidRootPart") and v:FindFirstChild("Humanoid") then
+            if v.Humanoid.Health > 0 and v.Name == name then
+                local dist = (LP.Character.HumanoidRootPart.Position - v.HumanoidRootPart.Position).Magnitude
+                if dist < maxDist then
+                    maxDist = dist
+                    closest = v
+                end
+            end
+        end
+    end
+    return closest
+end
+
+--// LISTAR NOMES (Executa apenas ao clicar no botão)
+local function GetEnemyNames()
+    local names = {}
+    local check = {}
+    local searchLocation = GetEnemyFolder()
+    local targets = (searchLocation == Workspace) and Workspace:GetDescendants() or searchLocation:GetChildren()
+
+    for _, v in pairs(targets) do
+        if v:IsA("Model") and v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 then
+            if not check[v.Name] and v.Name ~= LP.Name then
+                table.insert(names, v.Name)
+                check[v.Name] = true
+            end
+        end
+    end
+    return names
+end
+
+--// INTERFACE
+local Window = Fluent:CreateWindow({
+    Title = "FARM LEVE - ABYSS DEVOURER",
+    SubTitle = "Otimizado (Anti-Lag)",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(580, 460),
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.LeftControl
+})
+
+local Tabs = {
+    Main = Window:AddTab({ Title = "Farm", Icon = "sword" }),
+    Settings = Window:AddTab({ Title = "Config", Icon = "settings" })
+}
+
+local Options = Fluent.Options
+
+Tabs.Main:AddParagraph({
+    Title = "Como usar sem Lag",
+    Content = "1. Clique em 'Atualizar Lista'.\n2. Escolha o monstro.\n3. Ative o Farm.\nSe travar, diminua os gráficos do Roblox."
+})
+
+local MobDropdown = Tabs.Main:AddDropdown("MobSelect", {
+    Title = "Selecione o Inimigo",
+    Values = {"Clique Atualizar"},
+    Multi = false,
+    Default = 1,
+})
+
+Tabs.Main:AddButton({
+    Title = "🔄 Atualizar Lista de Mobs",
+    Description = "Clique apenas uma vez para carregar",
+    Callback = function()
+        local mobs = GetEnemyNames()
+        if #mobs > 0 then
+            MobDropdown:SetValues(mobs)
+            MobDropdown:SetValue(nil)
+            Fluent:Notify({Title = "Sucesso", Content = "Lista carregada!", Duration = 2})
+        else
+            Fluent:Notify({Title = "Aviso", Content = "Nenhum monstro encontrado perto.", Duration = 2})
+        end
+    end
+})
+
+Tabs.Main:AddToggle("FarmToggle", {Title = "ATIVAR AUTO FARM", Default = false }):OnChanged(function()
+    Config.AutoFarm = Options.FarmToggle.Value
+    Config.CurrentTarget = nil -- Reseta o alvo ao ligar/desligar
+end)
+
+MobDropdown:OnChanged(function(Value)
+    Config.SelectedMob = Value
+    Config.CurrentTarget = nil -- Reseta o alvo ao mudar de monstro
+end)
+
+--// LOOP DE FARM (LÓGICA OTIMIZADA)
+task.spawn(function()
+    while true do
+        task.wait(0.1) -- Espera 0.1s (reduz uso da CPU em 90%)
+        
+        if Config.AutoFarm and Config.SelectedMob ~= "" then
+            pcall(function()
+                -- Só procura um novo alvo se não tiver um ou se o atual morreu
+                if not Config.CurrentTarget or 
+                   not Config.CurrentTarget.Parent or 
+                   not Config.CurrentTarget:FindFirstChild("Humanoid") or 
+                   Config.CurrentTarget.Humanoid.Health <= 0 then
+                    
+                    Config.CurrentTarget = GetClosestEnemy(Config.SelectedMob)
+                end
+
+                -- Se tiver um alvo válido, ataca
+                local target = Config.CurrentTarget
+                if target and target:FindFirstChild("HumanoidRootPart") and target.Humanoid.Health > 0 then
+                    
+                    local hrp = LP.Character.HumanoidRootPart
+                    local targetPos = target.HumanoidRootPart.CFrame
+                    
+                    -- Teleporta suavemente (atrás e um pouco acima)
+                    hrp.CFrame = targetPos * CFrame.new(0, 5, 2) 
+                    
+                    -- Vira a câmera pro inimigo (ajuda no ataque)
+                    local cam = Workspace.CurrentCamera
+                    cam.CFrame = CFrame.new(cam.CFrame.Position, target.HumanoidRootPart.Position)
+
+                    -- Ataque
+                    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+                    -- Não precisa soltar o mouse imediatamente no loop rápido, 
+                    -- mas soltamos para garantir registro
+                    task.wait() 
+                    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+                else
+                    Config.CurrentTarget = nil -- Força buscar outro na próxima volta
+                end
+            end)
+        end
+    end
+end)
+
+--// FINALIZAÇÃO
+SaveManager:SetLibrary(Fluent)
+InterfaceManager:SetLibrary(Fluent)
+Window:SelectTab(1)
