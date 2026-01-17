@@ -1,0 +1,334 @@
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+
+--// SERVIÇOS E VARIÁVEIS GLOBAIS
+local Services = {
+    Players = game:GetService("Players"),
+    Workspace = game:GetService("Workspace"),
+    RunService = game:GetService("RunService"),
+    VirtualInputManager = game:GetService("VirtualInputManager")
+}
+
+local LP = Services.Players.LocalPlayer
+local Mouse = LP:GetMouse()
+
+--// ESTADO DO SCRIPT (STATE MACHINE)
+local State = {
+    IsFarming = false, -- Controle interno de loop
+    IsSpinning = false, -- Controle para saber se estamos focados em girar
+    TargetMob = nil
+}
+
+local Config = {
+    Enabled = false,
+    Mode = "Farm Apenas", -- Farm Apenas, Hibrido (Farm + Giro), Giro Automatico
+    SelectedMob = nil,
+    StarPosition = nil,
+    SpinCost = 500,
+    FarmTarget = 10000,
+    StopNex = 999999999,
+    HeightOffset = 15,
+    ScanRange = 500,
+    AutoE = false,
+    LastError = "Nenhum erro detectado."
+}
+
+--// SISTEMA DE LOG E ERROS
+local function SendError(msg)
+    Config.LastError = tostring(msg)
+    -- Fluent:Notify({Title = "DEBUG", Content = msg, Duration = 3}) -- Descomentar para debug intenso
+end
+
+--// UTILITÁRIOS DE FÍSICA E COMBATE
+local function FreezeCharacter(rootPart)
+    if rootPart then
+        rootPart.Velocity = Vector3.new(0, 0, 0)
+        rootPart.RotVelocity = Vector3.new(0, 0, 0)
+    end
+end
+
+local function Attack()
+    Services.VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+    task.wait(0.05) -- Delay curto para registro
+    Services.VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+end
+
+local function PressE()
+    Services.VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+    task.wait(0.05)
+    Services.VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+end
+
+--// FUNÇÕES DE BUSCA INTELIGENTE
+local function GetEnemyFolder()
+    local potentialFolders = {"Enemies", "Mobs", "Monsters", "NPCs", "Units"}
+    for _, name in ipairs(potentialFolders) do
+        if Services.Workspace:FindFirstChild(name) then return Services.Workspace[name] end
+    end
+    return Services.Workspace -- Fallback arriscado, mas necessário se não houver pasta
+end
+
+local function GetEnemyNames()
+    local names = {}
+    local seen = {}
+    local folder = GetEnemyFolder()
+    
+    -- Otimização: Se for Workspace, não usa GetDescendants para evitar crash em mapas grandes
+    local targets = (folder == Services.Workspace) and folder:GetChildren() or folder:GetChildren()
+
+    for _, v in ipairs(targets) do
+        if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") then
+            local h = v.Humanoid
+            if h.Health > 0 then
+                local dist = (LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")) 
+                             and (LP.Character.HumanoidRootPart.Position - v.HumanoidRootPart.Position).Magnitude 
+                             or 999999
+                
+                if dist <= Config.ScanRange then
+                    if v.Name ~= LP.Name and not seen[v.Name] then
+                        table.insert(names, v.Name)
+                        seen[v.Name] = true
+                    end
+                end
+            end
+        end
+    end
+    if #names == 0 then return {"Nenhum mob próximo"} end
+    table.sort(names)
+    return names
+end
+
+local function GetClosestEnemy(name)
+    if not name or name == "Nenhum mob próximo" then return nil end
+    
+    local closest = nil
+    local shortestDist = Config.ScanRange
+    local folder = GetEnemyFolder()
+    local targets = folder:GetChildren()
+
+    local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+
+    for _, v in ipairs(targets) do
+        if v.Name == name and v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 and v:FindFirstChild("HumanoidRootPart") then
+            local dist = (myRoot.Position - v.HumanoidRootPart.Position).Magnitude
+            if dist < shortestDist then
+                closest = v
+                shortestDist = dist
+            end
+        end
+    end
+    return closest
+end
+
+--// INTERFACE GRÁFICA (UI)
+local Window = Fluent:CreateWindow({
+    Title = "SOULHUB V7.8 - PROFESSIONAL",
+    SubTitle = "By SoulHub Dev",
+    TabWidth = 160, Size = UDim2.fromOffset(580, 460), Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.Delete
+})
+
+local Tabs = {
+    Main = Window:AddTab({ Title = "Principal", Icon = "sword" }),
+    Star = Window:AddTab({ Title = "Sistema Gacha", Icon = "star" }),
+    Players = Window:AddTab({ Title = "Players", Icon = "users" }),
+    Config = Window:AddTab({ Title = "Debug/Settings", Icon = "settings" })
+}
+
+local Options = Fluent.Options
+
+-- [[ ABA PRINCIPAL ]]
+Tabs.Main:AddSlider("ScanRange", { Title = "Alcance de Detecção", Default = 500, Min = 50, Max = 5000, Rounding = 0, Callback = function(v) Config.ScanRange = v end })
+Tabs.Main:AddSlider("Height", { Title = "Altura (Offset)", Default = 15, Min = -10, Max = 50, Rounding = 1, Callback = function(v) Config.HeightOffset = v end })
+
+local MobDropdown = Tabs.Main:AddDropdown("MobSelect", { Title = "Selecione o Alvo", Values = {"Clique em Atualizar"}, Default = 1, Callback = function(v) Config.SelectedMob = v end })
+Tabs.Main:AddButton({ Title = "🔄 Atualizar Lista de Mobs", Callback = function() MobDropdown:SetValues(GetEnemyNames()) end })
+
+Tabs.Main:AddButton({
+    Title = "📍 Teleporte Único (Manual)",
+    Callback = function()
+        local target = GetClosestEnemy(Config.SelectedMob)
+        if target and LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then
+            LP.Character.HumanoidRootPart.CFrame = target.HumanoidRootPart.CFrame * CFrame.new(0, Config.HeightOffset, 0)
+        else
+            Fluent:Notify({Title = "Aviso", Content = "Nenhum alvo encontrado ou personagem inválido.", Duration = 3})
+        end
+    end
+})
+
+Tabs.Main:AddDropdown("ModeSelect", {
+    Title = "Modo de Operação",
+    Values = {"Farm Apenas", "Hibrido (Farm + Giro)", "Giro Automatico"},
+    Default = 1,
+    Callback = function(v) 
+        Config.Mode = v 
+        State.IsSpinning = false -- Reseta estado ao mudar modo
+    end
+})
+
+local MasterToggle = Tabs.Main:AddToggle("MasterToggle", {Title = "ATIVAR SCRIPT", Default = false })
+MasterToggle:OnChanged(function() 
+    Config.Enabled = Options.MasterToggle.Value 
+    if not Config.Enabled then State.IsSpinning = false end
+end)
+
+-- [[ ABA ESTRELA ]]
+Tabs.Star:AddButton({ Title = "📍 Gravar Local da Estrela", Callback = function() 
+    if LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then
+        Config.StarPosition = LP.Character.HumanoidRootPart.CFrame 
+        Fluent:Notify({Title = "Sucesso", Content = "Local da Estrela salvo!", Duration = 3})
+    end
+end })
+
+Tabs.Star:AddButton({ Title = "🚀 Teleportar para Estrela", Callback = function() 
+    if Config.StarPosition and LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then 
+        LP.Character.HumanoidRootPart.CFrame = Config.StarPosition 
+    else
+        Fluent:Notify({Title = "Erro", Content = "Defina o local da estrela primeiro!", Duration = 3})
+    end
+end })
+
+Tabs.Star:AddInput("Target", {Title = "Meta de Nex (Para ir Girar)", Default = "10000", Numeric = true, Callback = function(v) Config.FarmTarget = tonumber(v) or 10000 end})
+Tabs.Star:AddInput("Cost", {Title = "Custo do Giro (Para Voltar)", Default = "500", Numeric = true, Callback = function(v) Config.SpinCost = tonumber(v) or 500 end})
+Tabs.Star:AddInput("StopNexInput", {Title = "Parar Tudo em X Nex", Default = "99999999", Numeric = true, Callback = function(v) Config.StopNex = tonumber(v) or 99999999 end})
+Tabs.Star:AddToggle("AutoEToggle", {Title = "Auto E (Independente)", Default = false, Callback = function(v) Config.AutoE = v end })
+
+-- [[ ABA PLAYERS ]]
+-- Adicionar lista de players simples
+local PlayerDropdown = Tabs.Players:AddDropdown("PlayerSelect", { Title = "Selecione Jogador", Values = {}, Default = 1 })
+
+local function UpdatePlayerList()
+    local pList = {}
+    for _, p in pairs(Services.Players:GetPlayers()) do
+        if p ~= LP then table.insert(pList, p.Name) end
+    end
+    PlayerDropdown:SetValues(pList)
+end
+
+Tabs.Players:AddButton({ Title = "🔄 Atualizar Players", Callback = UpdatePlayerList })
+Tabs.Players:AddButton({ Title = "Ir até Jogador", Callback = function()
+    local targetP = Services.Players:FindFirstChild(PlayerDropdown.Value)
+    if targetP and targetP.Character and targetP.Character:FindFirstChild("HumanoidRootPart") and LP.Character then
+        LP.Character.HumanoidRootPart.CFrame = targetP.Character.HumanoidRootPart.CFrame
+    end
+end})
+
+-- [[ ABA DEBUG ]]
+local ErrorParagraph = Tabs.Config:AddParagraph({ Title = "Console", Content = "Sem erros." })
+Tabs.Config:AddButton({ Title = "Copiar Erro", Callback = function() setclipboard(Config.LastError) end })
+
+--// CORE LOOP (CORAÇÃO DO SCRIPT)
+task.spawn(function()
+    while true do
+        task.wait(0.05) -- Loop rápido, mas não insano (20 FPS logico)
+        
+        if Config.Enabled and LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") and LP.Character:FindFirstChild("Humanoid") then
+            if LP.Character.Humanoid.Health <= 0 then 
+                State.IsSpinning = false -- Resetar se morrer
+                goto continue_loop 
+            end
+
+            local success, err = pcall(function()
+                local hrp = LP.Character.HumanoidRootPart
+                
+                -- LEITURA DE DADOS
+                local nex = 0
+                local ls = LP:FindFirstChild("leaderstats")
+                if ls and ls:FindFirstChild("Nex") then
+                    nex = tonumber(ls.Nex.Value) or 0
+                end
+
+                -- CHECK DE PARADA TOTAL
+                if nex >= Config.StopNex then
+                    Config.Enabled = false
+                    Options.MasterToggle:SetValue(false)
+                    Fluent:Notify({Title = "Meta Atingida", Content = "Script pausado pelo limite de Nex.", Duration = 5})
+                    return
+                end
+
+                -- LÓGICA DE MODO
+                if Config.Mode == "Giro Automatico" then
+                    -- Vai para estrela e spamma E
+                    if Config.StarPosition then
+                        if (hrp.Position - Config.StarPosition.Position).Magnitude > 5 then
+                            hrp.CFrame = Config.StarPosition
+                        end
+                        FreezeCharacter(hrp)
+                        if nex >= Config.SpinCost then
+                            PressE()
+                        end
+                    end
+
+                elseif Config.Mode == "Hibrido (Farm + Giro)" then
+                    -- MÁQUINA DE ESTADOS:
+                    -- Se atingir a meta, entra no modo "IsSpinning"
+                    if nex >= Config.FarmTarget then
+                        State.IsSpinning = true
+                    end
+                    -- Se o dinheiro acabar (menor que custo do giro), sai do modo "IsSpinning"
+                    if nex < Config.SpinCost then
+                        State.IsSpinning = false
+                    end
+
+                    if State.IsSpinning then
+                        -- COMPORTAMENTO DE GIRO
+                        if Config.StarPosition then
+                            if (hrp.Position - Config.StarPosition.Position).Magnitude > 5 then
+                                hrp.CFrame = Config.StarPosition
+                            end
+                            FreezeCharacter(hrp)
+                            if nex >= Config.SpinCost then
+                                PressE()
+                            end
+                        else
+                            SendError("Posição da Estrela não definida!")
+                        end
+                    else
+                        -- COMPORTAMENTO DE FARM (Mesma lógica do Farm Apenas)
+                        local target = GetClosestEnemy(Config.SelectedMob)
+                        if target and target:FindFirstChild("HumanoidRootPart") then
+                            hrp.CFrame = target.HumanoidRootPart.CFrame * CFrame.new(0, Config.HeightOffset, 0)
+                            FreezeCharacter(hrp) -- Estabiliza
+                            -- Olha para baixo (opcional, ajuda em alguns jogos)
+                            hrp.CFrame = CFrame.new(hrp.Position, target.HumanoidRootPart.Position)
+                            Attack()
+                        end
+                    end
+
+                elseif Config.Mode == "Farm Apenas" then
+                    local target = GetClosestEnemy(Config.SelectedMob)
+                    if target and target:FindFirstChild("HumanoidRootPart") then
+                        hrp.CFrame = target.HumanoidRootPart.CFrame * CFrame.new(0, Config.HeightOffset, 0)
+                        FreezeCharacter(hrp)
+                        hrp.CFrame = CFrame.new(hrp.Position, target.HumanoidRootPart.Position)
+                        Attack()
+                    end
+                end
+            end)
+
+            if not success then
+                SendError(err)
+                ErrorParagraph:SetTitle("Erro Detectado: " .. tostring(err))
+            end
+        end
+        ::continue_loop::
+    end
+end)
+
+-- LOOP SECUNDÁRIO: AUTO INTERAGIR (INDEPENDENTE)
+-- Funciona mesmo se o script principal estiver parado, se o usuário quiser só ficar perto da estrela manualmente
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if Config.AutoE and LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then
+            if Config.StarPosition and (LP.Character.HumanoidRootPart.Position - Config.StarPosition.Position).Magnitude < 20 then
+                 PressE()
+            end
+        end
+    end
+end)
+
+Window:SelectTab(1)
+Fluent:Notify({Title = "SoulHub Carregado", Content = "Versão V7.8 Otimizada pronta.", Duration = 5})
